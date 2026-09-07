@@ -1,0 +1,17 @@
+{
+  "name": "trello-kiro-adapter",
+  "version": "1.0.0",
+  "description": "Adapter que recebe o webhook do Trello ao mover um card para 'Go Dev' e dispara o Kiro via register_hook URL.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "license": "MIT"
+}
