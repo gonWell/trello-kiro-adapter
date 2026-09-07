@@ -24,6 +24,18 @@ const KIRO_HOOK_TOKEN = process.env.KIRO_HOOK_TOKEN || "";
 // cada requisição com HMAC-SHA256 (headers X-KiroCrew-Timestamp/X-KiroCrew-Signature).
 const KIRO_SIGNING_SECRET = process.env.KIRO_SIGNING_SECRET || "";
 
+// Origin declarado na chamada ao hook (para passar o CSRF middleware do dashboard).
+// Default: a própria origem da KIRO_HOOK_URL. Override via env se necessário.
+const KIRO_HOOK_ORIGIN =
+  process.env.KIRO_HOOK_ORIGIN ||
+  (() => {
+    try {
+      return new URL(process.env.KIRO_HOOK_URL || "").origin;
+    } catch {
+      return "";
+    }
+  })();
+
 // sessionKey e name retornados pelo register_hook (ex.: hook:trello-go-dev-pipeline).
 const KIRO_SESSION_KEY = process.env.KIRO_SESSION_KEY || "hook:trello-go-dev-pipeline";
 const KIRO_HOOK_NAME = process.env.KIRO_HOOK_NAME || "trello-go-dev-pipeline";
@@ -208,6 +220,10 @@ app.post(["/", "/trello"], async (req, res) => {
   try {
     const headers = { "Content-Type": "application/json" };
     if (KIRO_HOOK_TOKEN) headers["Authorization"] = `Bearer ${KIRO_HOOK_TOKEN}`;
+    // O endpoint /api/hooks/agent passa pelo CSRF middleware do dashboard, que exige
+    // um Origin na allowlist. Chamada server-to-server: declaramos a própria origem
+    // do dashboard (derivada de KIRO_HOOK_URL) para satisfazer o check.
+    if (KIRO_HOOK_ORIGIN) headers["Origin"] = KIRO_HOOK_ORIGIN;
     const hookBody = JSON.stringify({
       message: prompt,
       sessionKey: KIRO_SESSION_KEY,
