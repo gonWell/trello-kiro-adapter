@@ -43,6 +43,12 @@ const KIRO_HOOK_NAME = process.env.KIRO_HOOK_NAME || "trello-go-dev-pipeline";
 // Id da lista "Go Dev" — só disparamos quando o card ENTRA nela.
 const GO_DEV_LIST_ID = process.env.GO_DEV_LIST_ID || "";
 
+// Id da lista "In Dev" — o adapter move o card pra cá ao acionar o Kiro.
+const IN_DEV_LIST_ID = process.env.IN_DEV_LIST_ID || "";
+
+// Id da lista "PR Review" — o Kiro move o card pra cá ao abrir o PR (via prompt).
+const PR_REVIEW_LIST_ID = process.env.PR_REVIEW_LIST_ID || "";
+
 // Id do board da esteira (usado só para log/sanidade).
 const BOARD_ID = process.env.BOARD_ID || "";
 
@@ -125,7 +131,7 @@ function resolveRepo(labelNames) {
   return first ? `${DEFAULT_GH_OWNER}/${first}` : null;
 }
 
-function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl }) {
+function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId }) {
   return [
     `Nova tarefa da esteira Trello (card movido para "Go Dev").`,
     ``,
@@ -133,6 +139,8 @@ function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl }) {
     `Modo de merge: ${mergeMode.toUpperCase()}`,
     `Card: ${cardName}`,
     `Link: ${cardUrl}`,
+    `Card ID (Trello): ${cardId}`,
+    PR_REVIEW_LIST_ID ? `Lista "PR Review" (Trello list id): ${PR_REVIEW_LIST_ID}` : ``,
     ``,
     `--- Descrição do card ---`,
     cardDesc || "(sem descrição)",
@@ -144,8 +152,32 @@ function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl }) {
     mergeMode === "auto"
       ? `4. MERGE=auto: se o build/checks passarem, faça o merge do PR via API REST e deixe o Coolify deployar.`
       : `4. MERGE=manual: PARE após abrir o PR. NÃO faça merge — aguarde revisão humana.`,
-    `5. Responda com o link do PR.`,
-  ].join("\n");
+    PR_REVIEW_LIST_ID
+      ? `5. Ao abrir o PR, mova o card no Trello para "PR Review" usando o Trello MCP: move_card(cardId="${cardId}", listId="${PR_REVIEW_LIST_ID}"). Cole o link do PR como comentário no card.`
+      : `5. Ao abrir o PR, mova o card no Trello para a coluna "PR Review" e cole o link do PR como comentário no card.`,
+    `6. Responda com o link do PR.`,
+  ]
+    .filter((l) => l !== ``)
+    .join("\n");
+}
+
+// Move um card do Trello para outra lista (usado para Go Dev -> In Dev pelo adapter).
+async function moveCardToList(cardId, listId) {
+  const key = process.env.TRELLO_KEY;
+  const token = process.env.TRELLO_TOKEN;
+  if (!key || !token || !cardId || !listId) return false;
+  try {
+    const url = `https://api.trello.com/1/cards/${cardId}?idList=${listId}&key=${key}&token=${token}`;
+    const r = await fetch(url, { method: "PUT" });
+    if (!r.ok) {
+      console.error(`[trello] falha ao mover card ${cardId} -> lista ${listId}: HTTP ${r.status}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error("[trello] erro ao mover card:", e.message);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +242,7 @@ app.post(["/", "/trello"], async (req, res) => {
     return res.status(200).json({ ignored: true, reason: "no project label" });
   }
 
-  const prompt = buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl });
+  const prompt = buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId });
 
   if (!KIRO_HOOK_URL) {
     console.error("[kiro] KIRO_HOOK_URL não configurada — não é possível disparar.");
@@ -247,6 +279,12 @@ app.post(["/", "/trello"], async (req, res) => {
     console.log(
       `[kiro] disparado para "${cardName}" (repo=${repo}, merge=${mergeMode}) -> HTTP ${r.status}`
     );
+    // Só move o card para "In Dev" se o Kiro ACEITOU o disparo (2xx). Assim o card
+    // não sai de Go Dev quando a chamada falha (401/403/5xx) — evita estado mentiroso.
+    if (r.ok && IN_DEV_LIST_ID) {
+      const moved = await moveCardToList(cardId, IN_DEV_LIST_ID);
+      console.log(`[trello] card "${cardName}" -> In Dev: ${moved ? "ok" : "falhou"}`);
+    }
   } catch (e) {
     console.error("[kiro] erro ao chamar KIRO_HOOK_URL:", e.message);
     return res.status(200).json({ triggered: false, error: e.message });
