@@ -20,6 +20,10 @@ const KIRO_HOOK_URL = process.env.KIRO_HOOK_URL || "";
 // Token Bearer do webhook (criado no dashboard: Settings -> Webhooks). Sem ele o endpoint dá 401.
 const KIRO_HOOK_TOKEN = process.env.KIRO_HOOK_TOKEN || "";
 
+// Segredo de assinatura do webhook (kc_whs_...). Quando presente, o adapter assina
+// cada requisição com HMAC-SHA256 (headers X-KiroCrew-Timestamp/X-KiroCrew-Signature).
+const KIRO_SIGNING_SECRET = process.env.KIRO_SIGNING_SECRET || "";
+
 // sessionKey e name retornados pelo register_hook (ex.: hook:trello-go-dev-pipeline).
 const KIRO_SESSION_KEY = process.env.KIRO_SESSION_KEY || "hook:trello-go-dev-pipeline";
 const KIRO_HOOK_NAME = process.env.KIRO_HOOK_NAME || "trello-go-dev-pipeline";
@@ -204,14 +208,25 @@ app.post(["/", "/trello"], async (req, res) => {
   try {
     const headers = { "Content-Type": "application/json" };
     if (KIRO_HOOK_TOKEN) headers["Authorization"] = `Bearer ${KIRO_HOOK_TOKEN}`;
+    const hookBody = JSON.stringify({
+      message: prompt,
+      sessionKey: KIRO_SESSION_KEY,
+      name: KIRO_HOOK_NAME,
+    });
+    // Assinatura HMAC-SHA256 do Kiro: sha256=HMAC(secret, `${timestamp}.${body}`).
+    if (KIRO_SIGNING_SECRET) {
+      const ts = Math.floor(Date.now() / 1000).toString();
+      const sig = crypto
+        .createHmac("sha256", KIRO_SIGNING_SECRET)
+        .update(ts + "." + hookBody)
+        .digest("hex");
+      headers["X-KiroCrew-Timestamp"] = ts;
+      headers["X-KiroCrew-Signature"] = "sha256=" + sig;
+    }
     const r = await fetch(KIRO_HOOK_URL, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        message: prompt,
-        sessionKey: KIRO_SESSION_KEY,
-        name: KIRO_HOOK_NAME,
-      }),
+      body: hookBody,
     });
     console.log(
       `[kiro] disparado para "${cardName}" (repo=${repo}, merge=${mergeMode}) -> HTTP ${r.status}`
