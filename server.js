@@ -55,6 +55,17 @@ const IN_DEV_LIST_ID = process.env.IN_DEV_LIST_ID || "";
 // Id da lista "PR Review" — o Kiro move o card pra cá ao abrir o PR (via prompt).
 const PR_REVIEW_LIST_ID = process.env.PR_REVIEW_LIST_ID || "";
 
+// Id da lista "In Deploy" — GATILHO de aprovação: card entrando aqui = "aprovei,
+// mergeia e deploya". É o único caminho automático até produção.
+const IN_DEPLOY_LIST_ID = process.env.IN_DEPLOY_LIST_ID || "";
+
+// Id da lista "Backlog" — GATILHO de descarte quando o card vem de PR Review:
+// fecha o PR (a branch é preservada, para o descarte ser reversível).
+const BACKLOG_LIST_ID = process.env.BACKLOG_LIST_ID || "";
+
+// Id da lista "Done" — o Kiro move o card pra cá após o merge (via prompt).
+const DONE_LIST_ID = process.env.DONE_LIST_ID || "";
+
 // Id do board da esteira (usado só para log/sanidade).
 const BOARD_ID = process.env.BOARD_ID || "";
 
@@ -167,6 +178,118 @@ function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId 
     .join("\n");
 }
 
+// Rodada de revisão: já existe PR aberto para este card. NUNCA abrir um segundo PR —
+// commits adicionais vão na mesma branch e o PR se atualiza sozinho.
+function buildRevisionPrompt({ repo, cardName, cardDesc, cardUrl, cardId, pr, feedback }) {
+  const fb = feedback.length
+    ? feedback.map((c, i) => `(${i + 1}) ${c.text}`).join("\n\n")
+    : "(nenhum comentário novo no card — leia os review comments do PR no GitHub para descobrir o que foi pedido)";
+  return [
+    `RODADA DE REVISÃO da esteira Trello (card voltou para "Go Dev" com um PR já aberto).`,
+    ``,
+    `Repositório: ${repo}`,
+    `PR JÁ EXISTENTE: ${pr.url} (número ${pr.number})`,
+    `Card: ${cardName}`,
+    `Link: ${cardUrl}`,
+    `Card ID (Trello): ${cardId}`,
+    PR_REVIEW_LIST_ID ? `Lista "PR Review" (list id): ${PR_REVIEW_LIST_ID}` : ``,
+    ``,
+    `--- O que foi pedido nesta rodada ---`,
+    fb,
+    ``,
+    `--- Descrição original do card ---`,
+    cardDesc || "(sem descrição)",
+    ``,
+    `--- Instruções de execução ---`,
+    `1. NÃO abra um novo PR e NÃO crie uma branch nova. Descubra a branch do PR ${pr.number} via API REST (GET /repos/${repo}/pulls/${pr.number}, campo head.ref) e faça checkout dela.`,
+    `2. Implemente APENAS o que foi pedido nesta rodada. Não refaça o que já estava aprovado.`,
+    `3. Commit + push na MESMA branch (por nome de remote). O PR ${pr.number} se atualiza automaticamente.`,
+    `4. Comente no card (Card ID ${cardId}) o que mudou nesta revisão, citando o link ${pr.url}.`,
+    PR_REVIEW_LIST_ID
+      ? `5. Mova o card de volta para "PR Review": move_card(cardId="${cardId}", listId="${PR_REVIEW_LIST_ID}").`
+      : `5. Mova o card de volta para a coluna "PR Review".`,
+    `6. Responda com o link do PR e o resumo do que mudou.`,
+  ]
+    .filter((l) => l !== ``)
+    .join("\n");
+}
+
+// Aprovação: card entrou em "In Deploy". Mergeia o PR — mas só se os checks
+// estiverem verdes, porque o merge na branch default dispara deploy em produção.
+function buildDeployPrompt({ repo, cardName, cardUrl, cardId, pr }) {
+  return [
+    `APROVAÇÃO da esteira Trello: o card entrou em "In Deploy", ou seja o Wellington aprovou o PR e quer em produção.`,
+    ``,
+    `Repositório: ${repo}`,
+    `PR a mergear: ${pr.url} (número ${pr.number})`,
+    `Card: ${cardName}`,
+    `Link: ${cardUrl}`,
+    `Card ID (Trello): ${cardId}`,
+    PR_REVIEW_LIST_ID ? `Lista "PR Review" (list id): ${PR_REVIEW_LIST_ID}` : ``,
+    DONE_LIST_ID ? `Lista "Done" (list id): ${DONE_LIST_ID}` : ``,
+    ``,
+    `--- Instruções de execução ---`,
+    `1. Consulte o PR: GET /repos/${repo}/pulls/${pr.number}. Confirme que está "open" e leia "mergeable"/"mergeable_state".`,
+    `2. Confira os checks do commit HEAD do PR: GET /repos/${repo}/commits/<sha>/check-runs e /status. `,
+    `3. SE algum check obrigatório estiver falhando, ou houver conflito (mergeable=false): NÃO mergeie. Comente no card explicando exatamente o que está vermelho, mova o card de volta para "PR Review" e pare. Deploy quebrado é pior que deploy atrasado.`,
+    `4. SE os checks estiverem verdes (ou não houver nenhum check configurado): mergeie via PUT /repos/${repo}/pulls/${pr.number}/merge (merge_method "squash").`,
+    `5. Após o merge, comente no card confirmando o merge + que o Coolify vai deployar automaticamente no push para a branch default.`,
+    DONE_LIST_ID
+      ? `6. Mova o card para "Done": move_card(cardId="${cardId}", listId="${DONE_LIST_ID}").`
+      : `6. Mova o card para a coluna "Done".`,
+    `7. Responda dizendo se mergeou ou não, e por quê.`,
+  ]
+    .filter((l) => l !== ``)
+    .join("\n");
+}
+
+// Descarte: card voltou de "PR Review" para "Backlog". Fecha o PR SEM apagar a
+// branch, para o descarte continuar reversível (reabrir PR / recuperar trabalho).
+function buildDiscardPrompt({ repo, cardName, cardUrl, cardId, pr }) {
+  return [
+    `DESCARTE da esteira Trello: o card voltou de "PR Review" para "Backlog", ou seja o Wellington recusou esta proposta.`,
+    ``,
+    `Repositório: ${repo}`,
+    `PR a fechar: ${pr.url} (número ${pr.number})`,
+    `Card: ${cardName}`,
+    `Link: ${cardUrl}`,
+    `Card ID (Trello): ${cardId}`,
+    ``,
+    `--- Instruções de execução ---`,
+    `1. Feche o PR SEM mergear: PATCH /repos/${repo}/pulls/${pr.number} com {"state":"closed"}.`,
+    `2. NÃO apague a branch. O descarte precisa ser reversível — o trabalho fica recuperável e o PR pode ser reaberto.`,
+    `3. Comente no card informando que o PR ${pr.number} foi fechado sem merge e que a branch foi preservada (cite o nome dela).`,
+    `4. Deixe o card em "Backlog" — não mova para nenhuma outra coluna.`,
+    `5. Responda confirmando o fechamento e o nome da branch preservada.`,
+  ]
+    .filter((l) => l !== ``)
+    .join("\n");
+}
+
+// Comenta no card. Usado quando o adapter precisa avisar algo sem acionar o agente
+// (ex.: card entrou em In Deploy mas não há PR registrado).
+async function addCardComment(cardId, text) {
+  const key = process.env.TRELLO_KEY;
+  const token = process.env.TRELLO_TOKEN;
+  if (!key || !token || !cardId || !text) return false;
+  try {
+    const url = `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${key}&token=${token}`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      console.error(`[trello] falha ao comentar no card ${cardId}: HTTP ${r.status}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error("[trello] erro ao comentar:", e.message);
+    return false;
+  }
+}
+
 // Move um card do Trello para outra lista (usado para Go Dev -> In Dev pelo adapter).
 async function moveCardToList(cardId, listId) {
   const key = process.env.TRELLO_KEY;
@@ -187,8 +310,64 @@ async function moveCardToList(cardId, listId) {
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint principal do webhook
+// Comentários do card — é onde vive o estado da esteira e o feedback humano.
+// Não guardamos banco de dados: o link do PR que o próprio agente comentou na
+// rodada anterior é o que nos diz qual PR pertence a este card.
 // ---------------------------------------------------------------------------
+
+// Comentários postados pelo adapter/agente vêm com appCreator preenchido
+// (authType appKeyToken). Comentário digitado pelo humano tem appCreator null.
+// Esse é o discriminador que separa "nosso registro" de "feedback do Wellington".
+async function fetchCardComments(cardId) {
+  const key = process.env.TRELLO_KEY;
+  const token = process.env.TRELLO_TOKEN;
+  if (!key || !token || !cardId) return [];
+  try {
+    const url = `https://api.trello.com/1/cards/${cardId}/actions?filter=commentCard&limit=50&key=${key}&token=${token}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      console.error(`[trello] falha ao buscar comentários do card ${cardId}: HTTP ${r.status}`);
+      return [];
+    }
+    const acts = await r.json();
+    // A API devolve do mais novo para o mais antigo.
+    return (acts || [])
+      .map((a) => ({
+        text: a?.data?.text || "",
+        date: a?.date || "",
+        isBot: Boolean(a?.appCreator),
+      }))
+      .filter((c) => c.text);
+  } catch (e) {
+    console.error("[trello] erro ao buscar comentários:", e.message);
+    return [];
+  }
+}
+
+const PR_URL_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/;
+
+// Link do PR mais recente que o agente registrou no card (comentários vêm do
+// mais novo para o mais antigo, então o primeiro match é o PR atual).
+function extractPrUrl(comments) {
+  for (const c of comments) {
+    const m = c.text.match(PR_URL_RE);
+    if (m) return { url: m[0], number: m[1] };
+  }
+  return null;
+}
+
+// Comentários humanos posteriores ao último registro do agente = o feedback
+// novo desta rodada. Devolvido em ordem cronológica.
+function newFeedback(comments) {
+  const out = [];
+  for (const c of comments) {
+    if (c.isBot) break;
+    out.push(c);
+  }
+  return out.reverse();
+}
+
+
 app.post(["/", "/trello"], async (req, res) => {
   // Sempre responder 200 rápido para o Trello não reenfileirar/retry.
   // Validamos e processamos, mas o corpo da resposta não importa para o Trello.
@@ -202,12 +381,37 @@ app.post(["/", "/trello"], async (req, res) => {
   const type = action.type;
   const data = action.data || {};
 
-  // Só nos interessa card entrando na lista Go Dev.
+  // Máquina de estados da esteira: cada MOVIMENTO DE COLUNA é um verbo.
+  //   -> Go Dev     = "trabalha" (tarefa nova, ou nova rodada de revisão se já há PR)
+  //   -> In Deploy  = "aprovei: mergeia e deploya"  (único caminho até produção)
+  //   PR Review -> Backlog = "descarta: fecha o PR"
+  // Comentário NÃO é gatilho de propósito: produção só é tocada por um gesto
+  // explícito de arrastar o card, nunca por interpretação de texto livre.
+  //
+  // Os movimentos que o próprio adapter/agente faz (Go Dev->In Dev, In Dev->PR
+  // Review, In Deploy->Done) têm listAfter fora do conjunto de gatilhos, então
+  // não há risco de loop.
   const listAfterId = data.listAfter?.id;
-  const enteredGoDev = type === "updateCard" && listAfterId === GO_DEV_LIST_ID;
+  const listBeforeId = data.listBefore?.id;
 
-  if (!enteredGoDev) {
-    return res.status(200).json({ ignored: true, reason: "not a move into Go Dev" });
+  let intent = null;
+  if (type === "updateCard" && listAfterId) {
+    if (listAfterId === GO_DEV_LIST_ID) {
+      intent = "work";
+    } else if (IN_DEPLOY_LIST_ID && listAfterId === IN_DEPLOY_LIST_ID) {
+      intent = "deploy";
+    } else if (
+      BACKLOG_LIST_ID &&
+      PR_REVIEW_LIST_ID &&
+      listAfterId === BACKLOG_LIST_ID &&
+      listBeforeId === PR_REVIEW_LIST_ID
+    ) {
+      intent = "discard";
+    }
+  }
+
+  if (!intent) {
+    return res.status(200).json({ ignored: true, reason: "not a pipeline trigger move" });
   }
 
   const card = data.card || {};
@@ -248,7 +452,45 @@ app.post(["/", "/trello"], async (req, res) => {
     return res.status(200).json({ ignored: true, reason: "no project label" });
   }
 
-  const prompt = buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId });
+  // O estado da esteira vive nos comentários do card: o link do PR que o agente
+  // registrou na rodada anterior identifica o PR deste card, e os comentários
+  // humanos posteriores a ele são o feedback desta rodada.
+  const comments = await fetchCardComments(cardId);
+  const pr = extractPrUrl(comments);
+
+  let prompt;
+  let phase;
+
+  if (intent === "work") {
+    if (pr) {
+      phase = "revision";
+      prompt = buildRevisionPrompt({
+        repo, cardName, cardDesc, cardUrl, cardId, pr, feedback: newFeedback(comments),
+      });
+    } else {
+      phase = "first-round";
+      prompt = buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId });
+    }
+  } else if (intent === "deploy") {
+    if (!pr) {
+      // Sem PR não há o que mergear. Não inventamos estado: avisamos no card.
+      console.warn(`[webhook] card "${cardName}" entrou em In Deploy sem PR conhecido — ignorando.`);
+      await addCardComment(
+        cardId,
+        "⚠️ Card movido para In Deploy, mas não encontrei nenhum PR registrado nos comentários deste card. Nada foi mergeado. Mova para Go Dev para a esteira trabalhar, ou cole o link do PR num comentário e mova de novo para In Deploy."
+      );
+      return res.status(200).json({ ignored: true, reason: "no PR to merge" });
+    }
+    phase = "deploy";
+    prompt = buildDeployPrompt({ repo, cardName, cardUrl, cardId, pr });
+  } else {
+    if (!pr) {
+      console.warn(`[webhook] card "${cardName}" descartado sem PR conhecido — nada a fechar.`);
+      return res.status(200).json({ ignored: true, reason: "no PR to close" });
+    }
+    phase = "discard";
+    prompt = buildDiscardPrompt({ repo, cardName, cardUrl, cardId, pr });
+  }
 
   if (!KIRO_HOOK_URL) {
     console.error("[kiro] KIRO_HOOK_URL não configurada — não é possível disparar.");
@@ -284,11 +526,12 @@ app.post(["/", "/trello"], async (req, res) => {
       body: hookBody,
     });
     console.log(
-      `[kiro] disparado para "${cardName}" (repo=${repo}, merge=${mergeMode}, agent=${KIRO_HOOK_AGENT || "default"}) -> HTTP ${r.status}`
+      `[kiro] disparado para "${cardName}" (fase=${phase}, repo=${repo}, merge=${mergeMode}, pr=${pr ? "#" + pr.number : "-"}, agent=${KIRO_HOOK_AGENT || "default"}) -> HTTP ${r.status}`
     );
-    // Só move o card para "In Dev" se o Kiro ACEITOU o disparo (2xx). Assim o card
-    // não sai de Go Dev quando a chamada falha (401/403/5xx) — evita estado mentiroso.
-    if (r.ok && IN_DEV_LIST_ID) {
+    // Só a fase de trabalho move o card para "In Dev". Nas fases de deploy e
+    // descarte o card já está na coluna certa (In Deploy / Backlog) e é o agente
+    // que o leva para Done, então mexer aqui só criaria estado falso.
+    if (r.ok && phase !== "deploy" && phase !== "discard" && IN_DEV_LIST_ID) {
       const moved = await moveCardToList(cardId, IN_DEV_LIST_ID);
       console.log(`[trello] card "${cardName}" -> In Dev: ${moved ? "ok" : "falhou"}`);
     }
@@ -297,10 +540,19 @@ app.post(["/", "/trello"], async (req, res) => {
     return res.status(200).json({ triggered: false, error: e.message });
   }
 
-  return res.status(200).json({ triggered: true, repo, mergeMode, card: cardName });
+  return res.status(200).json({ triggered: true, phase, repo, mergeMode, card: cardName });
 });
 
-export { extractMergeMode, resolveRepo, buildKiroPrompt };
+export {
+  extractMergeMode,
+  resolveRepo,
+  buildKiroPrompt,
+  buildRevisionPrompt,
+  buildDeployPrompt,
+  buildDiscardPrompt,
+  extractPrUrl,
+  newFeedback,
+};
 
 // Não sobe o servidor quando importado por um teste de unidade.
 if (process.env.ADAPTER_NO_LISTEN !== "true") {
