@@ -14,7 +14,15 @@ const TRELLO_SECRET = process.env.TRELLO_SECRET || "";
 const CALLBACK_URL = process.env.CALLBACK_URL || "";
 
 // URL gerada pelo register_hook do Kiro. O adapter faz POST aqui para injetar a tarefa.
+// Ex.: https://kiro-crew.bwdi.online/api/hooks/agent
 const KIRO_HOOK_URL = process.env.KIRO_HOOK_URL || "";
+
+// Token Bearer do webhook (criado no dashboard: Settings -> Webhooks). Sem ele o endpoint dá 401.
+const KIRO_HOOK_TOKEN = process.env.KIRO_HOOK_TOKEN || "";
+
+// sessionKey e name retornados pelo register_hook (ex.: hook:trello-go-dev-pipeline).
+const KIRO_SESSION_KEY = process.env.KIRO_SESSION_KEY || "hook:trello-go-dev-pipeline";
+const KIRO_HOOK_NAME = process.env.KIRO_HOOK_NAME || "trello-go-dev-pipeline";
 
 // Id da lista "Go Dev" — só disparamos quando o card ENTRA nela.
 const GO_DEV_LIST_ID = process.env.GO_DEV_LIST_ID || "";
@@ -194,13 +202,15 @@ app.post(["/", "/trello"], async (req, res) => {
   }
 
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (KIRO_HOOK_TOKEN) headers["Authorization"] = `Bearer ${KIRO_HOOK_TOKEN}`;
     const r = await fetch(KIRO_HOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         message: prompt,
-        source: "trello-kiro-adapter",
-        card: { id: cardId, name: cardName, url: cardUrl, repo, mergeMode },
+        sessionKey: KIRO_SESSION_KEY,
+        name: KIRO_HOOK_NAME,
       }),
     });
     console.log(
