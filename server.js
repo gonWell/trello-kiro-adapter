@@ -170,7 +170,7 @@ app.post(["/", "/trello"], async (req, res) => {
     const key = process.env.TRELLO_KEY;
     const token = process.env.TRELLO_TOKEN;
     if (key && token && cardId) {
-      const url = `https://api.trello.com/1/cards/${cardId}?fields=name,desc&labels=all&key=${key}&token=${token}`;
+      const url = `https://api.trello.com/1/cards/${cardId}?fields=name,desc,labels&key=${key}&token=${token}`;
       const r = await fetch(url);
       if (r.ok) {
         const full = await r.json();
