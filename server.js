@@ -40,6 +40,12 @@ const KIRO_HOOK_ORIGIN =
 const KIRO_SESSION_KEY = process.env.KIRO_SESSION_KEY || "hook:trello-go-dev-pipeline";
 const KIRO_HOOK_NAME = process.env.KIRO_HOOK_NAME || "trello-go-dev-pipeline";
 
+// Agente Kiro que executa a tarefa na sessão de webhook. Precisa ser um agente cujo
+// allowedTools já pré-aprove execute_bash/fs_write/Trello writes: a sessão de webhook
+// é efêmera e NÃO tem ninguém para confirmar ferramenta, então uma tool que exige
+// confirmação trava o turno até o teto de 599s. Vazio = agente default (kirocrew).
+const KIRO_HOOK_AGENT = process.env.KIRO_HOOK_AGENT || "";
+
 // Id da lista "Go Dev" — só disparamos quando o card ENTRA nela.
 const GO_DEV_LIST_ID = process.env.GO_DEV_LIST_ID || "";
 
@@ -260,6 +266,7 @@ app.post(["/", "/trello"], async (req, res) => {
       message: prompt,
       sessionKey: KIRO_SESSION_KEY,
       name: KIRO_HOOK_NAME,
+      ...(KIRO_HOOK_AGENT ? { agent: KIRO_HOOK_AGENT } : {}),
     });
     // Assinatura HMAC-SHA256 do Kiro: sha256=HMAC(secret, `${timestamp}.${body}`).
     if (KIRO_SIGNING_SECRET) {
@@ -277,7 +284,7 @@ app.post(["/", "/trello"], async (req, res) => {
       body: hookBody,
     });
     console.log(
-      `[kiro] disparado para "${cardName}" (repo=${repo}, merge=${mergeMode}) -> HTTP ${r.status}`
+      `[kiro] disparado para "${cardName}" (repo=${repo}, merge=${mergeMode}, agent=${KIRO_HOOK_AGENT || "default"}) -> HTTP ${r.status}`
     );
     // Só move o card para "In Dev" se o Kiro ACEITOU o disparo (2xx). Assim o card
     // não sai de Go Dev quando a chamada falha (401/403/5xx) — evita estado mentiroso.
