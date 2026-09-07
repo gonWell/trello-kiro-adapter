@@ -356,12 +356,20 @@ function extractPrUrl(comments) {
   return null;
 }
 
-// Comentários humanos posteriores ao último registro do agente = o feedback
-// novo desta rodada. Devolvido em ordem cronológica.
+// Comentários posteriores ao último STATUS do agente = o feedback desta rodada.
+//
+// A âncora é o comentário de status do agente, identificado por "vem da API E
+// contém link de PR" — não por "vem da API" sozinho. Isso importa porque um
+// comentário feito por qualquer integração (não só o agente) também chega com
+// appCreator preenchido; usar appCreator puro descartaria feedback legítimo
+// postado via API. O status do agente sempre carrega o link do PR, então essa
+// combinação identifica ele sem ambiguidade.
+//
+// Devolvido em ordem cronológica.
 function newFeedback(comments) {
   const out = [];
   for (const c of comments) {
-    if (c.isBot) break;
+    if (c.isBot && PR_URL_RE.test(c.text)) break;
     out.push(c);
   }
   return out.reverse();
