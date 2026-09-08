@@ -235,7 +235,7 @@ function buildDeployPrompt({ repo, cardName, cardUrl, cardId, pr }) {
     `4. SE os checks estiverem verdes (ou não houver nenhum check configurado): mergeie via PUT /repos/${repo}/pulls/${pr.number}/merge (merge_method "squash").`,
     `5. Após o merge, comente no card confirmando o merge + que o Coolify vai deployar automaticamente no push para a branch default.`,
     DONE_LIST_ID
-      ? `6. Mova o card para "Done": move_card(cardId="${cardId}", listId="${DONE_LIST_ID}").`
+      ? `6. Mova o card para "Done": move_card(cardId="${cardId}", listId="${DONE_LIST_ID}"). O adapter marca o card como concluído automaticamente ao detectar a entrada em Done — você não precisa fazer isso.`
       : `6. Mova o card para a coluna "Done".`,
     `7. Responda dizendo se mergeou ou não, e por quê.`,
   ]
@@ -286,6 +286,27 @@ async function addCardComment(cardId, text) {
     return true;
   } catch (e) {
     console.error("[trello] erro ao comentar:", e.message);
+    return false;
+  }
+}
+
+// Marca o card como concluído (o "Concluído" do Trello = campo dueComplete).
+// Usado quando o card entra em "Done": o estado visual do board passa a refletir
+// que a tarefa terminou, sem depender de o agente lembrar de fazer isso.
+async function markCardComplete(cardId) {
+  const key = process.env.TRELLO_KEY;
+  const token = process.env.TRELLO_TOKEN;
+  if (!key || !token || !cardId) return false;
+  try {
+    const url = `https://api.trello.com/1/cards/${cardId}?dueComplete=true&key=${key}&token=${token}`;
+    const r = await fetch(url, { method: "PUT" });
+    if (!r.ok) {
+      console.error(`[trello] falha ao marcar card ${cardId} como concluído: HTTP ${r.status}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error("[trello] erro ao marcar como concluído:", e.message);
     return false;
   }
 }
@@ -401,6 +422,18 @@ app.post(["/", "/trello"], async (req, res) => {
   // não há risco de loop.
   const listAfterId = data.listAfter?.id;
   const listBeforeId = data.listBefore?.id;
+
+  // Card entrando em "Done": marca como concluído e encerra. Não aciona agente.
+  // Vale tanto para o movimento feito pelo agente após o merge quanto para um
+  // arrasto manual, então o board nunca fica com card em Done sem estar concluído.
+  // Marcar dueComplete não gera listAfter, então isto não pode entrar em loop.
+  if (DONE_LIST_ID && type === "updateCard" && listAfterId === DONE_LIST_ID) {
+    const doneCardId = data.card?.id;
+    const doneCardName = data.card?.name || "(sem nome)";
+    const marked = await markCardComplete(doneCardId);
+    console.log(`[trello] card "${doneCardName}" -> Done: concluído=${marked ? "ok" : "falhou"}`);
+    return res.status(200).json({ completed: marked, card: doneCardName });
+  }
 
   let intent = null;
   if (type === "updateCard" && listAfterId) {
