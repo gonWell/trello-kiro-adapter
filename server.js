@@ -158,6 +158,7 @@ function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId 
     `Link: ${cardUrl}`,
     `Card ID (Trello): ${cardId}`,
     PR_REVIEW_LIST_ID ? `Lista "PR Review" (Trello list id): ${PR_REVIEW_LIST_ID}` : ``,
+    IN_DEPLOY_LIST_ID ? `Lista "In Deploy" (Trello list id): ${IN_DEPLOY_LIST_ID}` : ``,
     ``,
     `--- Descrição do card ---`,
     cardDesc || "(sem descrição)",
@@ -167,11 +168,13 @@ function buildKiroPrompt({ repo, mergeMode, cardName, cardDesc, cardUrl, cardId 
     `2. Crie uma branch de feature e implemente a tarefa descrita acima.`,
     `3. Commit + push da branch (por nome de remote) e abra um PR.`,
     mergeMode === "auto"
-      ? `4. MERGE=auto: se o build/checks passarem, faça o merge do PR via API REST e deixe o Coolify deployar.`
+      ? `4. MERGE=auto: NÃO mergeie você mesmo. Comente o link do PR no card (Card ID ${cardId}) e SÓ DEPOIS mova o card para "In Deploy"${IN_DEPLOY_LIST_ID ? `: move_card(cardId="${cardId}", listId="${IN_DEPLOY_LIST_ID}")` : ""}. Essa entrada em In Deploy é o que dispara a etapa de merge+deploy da esteira, que verifica os checks, mergeia e move o card para "Done". A ORDEM importa: comentar o link primeiro, mover depois — a etapa de deploy descobre qual PR mergear lendo o comentário.`
       : `4. MERGE=manual: PARE após abrir o PR. NÃO faça merge — aguarde revisão humana.`,
-    PR_REVIEW_LIST_ID
-      ? `5. Ao abrir o PR, mova o card no Trello para "PR Review" usando o Trello MCP: move_card(cardId="${cardId}", listId="${PR_REVIEW_LIST_ID}"). Cole o link do PR como comentário no card.`
-      : `5. Ao abrir o PR, mova o card no Trello para a coluna "PR Review" e cole o link do PR como comentário no card.`,
+    mergeMode === "auto"
+      ? `5. Não mova o card para "PR Review" e não o mova para "Done" — quem faz isso é a etapa de deploy.`
+      : PR_REVIEW_LIST_ID
+        ? `5. Ao abrir o PR, cole o link do PR como comentário no card e mova o card para "PR Review": move_card(cardId="${cardId}", listId="${PR_REVIEW_LIST_ID}").`
+        : `5. Ao abrir o PR, cole o link do PR como comentário no card e mova o card para a coluna "PR Review".`,
     `6. Responda com o link do PR.`,
   ]
     .filter((l) => l !== ``)
@@ -545,9 +548,15 @@ app.post(["/", "/trello"], async (req, res) => {
     // um Origin na allowlist. Chamada server-to-server: declaramos a própria origem
     // do dashboard (derivada de KIRO_HOOK_URL) para satisfazer o check.
     if (KIRO_HOOK_ORIGIN) headers["Origin"] = KIRO_HOOK_ORIGIN;
+    // sessionKey ÚNICA POR CARD + FASE. O endpoint aceita um turno por sessionKey
+    // (o segundo recebe 409 session_busy), então uma chave global fazia dois cards
+    // simultâneos colidirem — e, com MERGE=auto, o disparo de deploy chegaria
+    // enquanto o turno de trabalho ainda estava aberto e seria recusado.
+    // Precisa começar com "hook:" (exigência do endpoint).
+    const sessionKey = `${KIRO_SESSION_KEY}:${cardId}:${phase}`;
     const hookBody = JSON.stringify({
       message: prompt,
-      sessionKey: KIRO_SESSION_KEY,
+      sessionKey,
       name: KIRO_HOOK_NAME,
       ...(KIRO_HOOK_AGENT ? { agent: KIRO_HOOK_AGENT } : {}),
     });
